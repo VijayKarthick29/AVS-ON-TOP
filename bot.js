@@ -343,14 +343,47 @@ function attachBot(bot) {
   }
   addLog('info', `Bot ${bot.number} token configured. Attempting Discord login.`);
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-  const botState = { ...bot, client, status: bot.status };
+  const botState = { ...bot, client, status: 'connecting', statusMessage: 'Waiting for Discord gateway.' };
   bots.push(botState);
+  const loginTimeout = setTimeout(() => {
+    if (!client.isReady()) {
+      botState.status = 'error';
+      botState.statusMessage = 'Discord gateway did not become ready within 45 seconds.';
+      addLog('error', `Bot ${bot.number} login timed out waiting for the Discord gateway. Check the token and outbound network access.`);
+    }
+  }, 45_000);
 
   client.once('ready', (readyClient) => {
+    clearTimeout(loginTimeout);
     botState.status = 'online';
     botState.statusMessage = 'Connected to Discord';
     botState.tag = readyClient.user.tag;
     addLog('info', `Bot ${bot.number} login successful as ${readyClient.user.tag}. Servers: ${readyClient.guilds.cache.size}.`);
+  });
+
+  client.on('shardError', (error, shardId) => {
+    botState.statusMessage = `Discord gateway error on shard ${shardId}: ${error.message}`;
+    addLog('error', `Bot ${bot.number} Discord gateway error on shard ${shardId}: ${error.message}.`);
+  });
+  client.on('shardDisconnect', (event, shardId) => {
+    botState.status = 'reconnecting';
+    botState.statusMessage = `Disconnected from Discord (code ${event.code}); reconnecting.`;
+    addLog('error', `Bot ${bot.number} disconnected from Discord on shard ${shardId}: code ${event.code}${event.reason ? `, reason ${event.reason}` : ''}.`);
+  });
+  client.on('shardReconnecting', (shardId) => {
+    botState.status = 'reconnecting';
+    botState.statusMessage = 'Reconnecting to Discord.';
+    addLog('info', `Bot ${bot.number} reconnecting to Discord on shard ${shardId}.`);
+  });
+  client.on('shardReady', (shardId) => {
+    clearTimeout(loginTimeout);
+    botState.status = 'online';
+    botState.statusMessage = 'Connected to Discord';
+    addLog('info', `Bot ${bot.number} Discord shard ${shardId} is ready.`);
+  });
+  client.on('error', (error) => {
+    botState.statusMessage = `Discord client error: ${error.message}`;
+    addLog('error', `Bot ${bot.number} Discord client error: ${error.message}.`);
   });
 
   client.on('voiceStateUpdate', (oldState, newState) => {
@@ -359,6 +392,7 @@ function attachBot(bot) {
   });
 
   client.login(bot.token).catch((error) => {
+    clearTimeout(loginTimeout);
     botState.status = 'error';
     botState.statusMessage = error.code === 4004 ? 'Invalid token' : error.message;
     addLog('error', `Bot ${bot.number} login failed: ${botState.statusMessage}.`);
